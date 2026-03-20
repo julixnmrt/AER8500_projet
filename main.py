@@ -23,6 +23,8 @@ ALT_RES          = 1          # résolution altitude (pied)
 ATTACK_MAX       = 16.0       # degrés
 ATTACK_MIN       = -16.0
 STALL_ANGLE      = 15.0       # angle de décrochage
+CRUISE_ANGLE     = 3.0        # angle d'attaque en vol de croisière (palier)
+MAX_SPEED_M_S    = 150.0      # vitesse sol max à 100% puissance (m/s ≈ 540 km/h)
 SIM_TICK_S       = 0.05       # secondes par tick de simulation
 
 # Conversion
@@ -218,7 +220,7 @@ class AvionicsCalculator:
         self.climb_m_min     = 0.0
         self.attack_deg      = 0.0
         self.motor_power_pct = 0.0
-        self.speed_m_s       = 0.0
+        self.speed_m_s       = 0.0   # vitesse sol GS — composante horizontale (m/s)
 
         # Consignes
         self.desired_alt_ft  = 0.0
@@ -292,16 +294,35 @@ class AvionicsCalculator:
     # ── Calcul de l'angle d'attaque auto ──────────────────────────────
     def compute_auto_attack(self, climb: float) -> float:
         """
-        Angle proportionnel au taux de montée normalisé.
-        Limité à ±(STALL_ANGLE - 0.1)° pour éviter le décrochage en auto.
-        Prend le taux de montée en paramètre pour éviter toute dépendance
-        circulaire (l'angle est toujours calculé APRÈS le taux final).
+        Angle d'attaque décalé autour de CRUISE_ANGLE :
+          angle = CRUISE_ANGLE + (climb / CLIMB_MAX) × (STALL_ANGLE - RES - CRUISE_ANGLE)
+
+          climb =    0  →  2.0°   (croisière, palier)
+          climb = +800  → +14.9°  (montée maximale)
+          climb = -800  →  -10.9° (descente maximale, asymétrique = plus réaliste)
         """
         if CLIMB_MAX_M_MIN == 0:
-            return 0.0
-        safe_limit = STALL_ANGLE - 0.1
-        angle = (climb / CLIMB_MAX_M_MIN) * safe_limit
-        return max(-safe_limit, min(safe_limit, angle))
+            return CRUISE_ANGLE
+        angle_range = (STALL_ANGLE - CLIMB_RES) - CRUISE_ANGLE   # 12.9°
+        angle = CRUISE_ANGLE + (climb / CLIMB_MAX_M_MIN) * angle_range
+        # Limites : ne pas dépasser ±(STALL_ANGLE - RES) en absolu
+        return max(-(STALL_ANGLE - CLIMB_RES), min(STALL_ANGLE - CLIMB_RES, angle))
+
+    # ── Calcul de la vitesse sol (GS) ─────────────────────────────────
+    def _compute_gs(self) -> float:
+        """
+        Vitesse sol GS = (power/100) × MAX_SPEED × cos(attack)
+
+        Physique :
+          - La puissance moteur détermine la magnitude totale de la vitesse.
+          - L'angle d'attaque redistribue entre vertical (climb) et horizontal (GS).
+          - En croisière (attack=3°, climb=0) : GS maximale pour la puissance donnée.
+          - En montée steep (attack=14.9°)    : GS légèrement réduite (cos↘).
+          - Au sol (power=0 ou state AU_SOL)  : GS = 0.
+        """
+        return ((self.motor_power_pct / 100.0)
+                * MAX_SPEED_M_S
+                * math.cos(math.radians(abs(self.attack_deg))))
 
     # ── Machine à états ───────────────────────────────────────────────
     def set_desired_altitude(self, alt_ft: float, climb: float, attack: float):
@@ -322,12 +343,13 @@ class AvionicsCalculator:
             angle_max = STALL_ANGLE - CLIMB_RES  # 14.9°
 
             if climb != 0.0:
-                # Input taux de montée → back-calcul de l'angle correspondant
-                # à partir de la puissance moteur courante :
-                #   angle = (climb / min(power×10, 800)) × 14.9
+                # Back-calcul angle depuis taux de montée (formule inversée) :
+                #   angle = CRUISE_ANGLE + (climb / ceil) × angle_range
                 ceil = min(self.motor_power_pct * 10.0, CLIMB_MAX_M_MIN)
                 if ceil > 0:
-                    angle_from_climb = (climb / ceil) * angle_max
+                    angle_range      = (STALL_ANGLE - CLIMB_RES) - CRUISE_ANGLE  # 12.9°
+                    angle_from_climb = CRUISE_ANGLE + (climb / ceil) * angle_range
+                    angle_max        = STALL_ANGLE - CLIMB_RES
                     angle_from_climb = max(-angle_max, min(angle_max, angle_from_climb))
                     self.input_attack = angle_from_climb
                     self.warnings.append(
@@ -344,15 +366,17 @@ class AvionicsCalculator:
                 self.input_attack = 0.0
 
             if self.state == STATE_AU_SOL:
-                if alt_ft > 0 and climb == 0.0 and attack == 0.0:
+                # Cas 1 : altitude seule → mode auto
+                if alt_ft > 0 and self.input_attack == 0.0:
                     self.motor_power_pct = 50.0
                     self._transition_to(STATE_CHANGEMENT)
-                elif alt_ft > 0 and climb != 0.0 and attack != 0.0:
+                # Cas 2 : altitude + taux de montée OU angle (ou les deux)
+                elif alt_ft > 0 and self.input_attack != 0.0:
                     self.motor_power_pct = 50.0
                     self._transition_to(STATE_CHANGEMENT)
                 else:
                     self.error_msg = ("AU_SOL : fournir altitude > 0 "
-                                      "(et optionnellement taux + angle non nuls)")
+                                      "(et optionnellement taux ou angle non nuls)")
 
             elif self.state == STATE_CHANGEMENT:
                 if alt_ft == self.altitude_ft:
@@ -413,6 +437,8 @@ class AvionicsCalculator:
             # ── VOL_CROISIÈRE ────────────────────────────────────────
             if self.state == STATE_VOL_CROISIERE:
                 self.climb_m_min = 0.0
+                self.attack_deg  = CRUISE_ANGLE
+                self.speed_m_s   = self._compute_gs()   # GS pleine à angle de croisière
                 self.alt_history.append(self.altitude_ft)
                 self._broadcast_state()
                 return
@@ -458,8 +484,13 @@ class AvionicsCalculator:
                 raw_climb = direction * effective_ceil
 
             # Décélération douce à l'approche de la cible
+            # Exception : pas de décélération si on atterrit (cible = 0 ft)
+            # car la transition AU_SOL se fait automatiquement via les bornes.
             if abs(delta_ft) < 0.1:
                 self.climb_m_min = 0.0
+            elif self.desired_alt_ft <= ALT_MIN_FT:
+                # Atterrissage : vitesse constante jusqu'au sol
+                self.climb_m_min = raw_climb
             else:
                 delta_m     = delta_ft / FT_PER_M
                 slow_zone_m = max(1.0, abs(raw_climb) * 0.8)
@@ -498,15 +529,21 @@ class AvionicsCalculator:
                 self._transition_to(STATE_AU_SOL)
 
             # Altitude cible atteinte (tolérance 2 ft)
+            # Si la cible est 0 ft (le sol), c'est AU_SOL et non VOL_CROISIÈRE
             if (self.state == STATE_CHANGEMENT and
                     abs(self.altitude_ft - self.desired_alt_ft) < 2.0):
                 self.altitude_ft = self.desired_alt_ft
-                self._transition_to(STATE_VOL_CROISIERE)
+                if self.desired_alt_ft <= ALT_MIN_FT:
+                    self._transition_to(STATE_AU_SOL)
+                else:
+                    self._transition_to(STATE_VOL_CROISIERE)
 
-            # Vitesse horizontale (approximation)
-            self.speed_m_s = (abs(self.climb_m_min / 60.0)
-                              * math.cos(math.radians(abs(self.attack_deg)))
-                              * 5.0)
+            # Vitesse sol GS — composante horizontale du vecteur vitesse
+            # GS = (power/100) × MAX_SPEED × cos(attack)
+            # Puissance → magnitude totale, angle → fraction horizontale.
+            # En croisière (attack=3°) → presque toute la puissance en GS.
+            # En montée steep (attack=14.9°) → légèrement réduit.
+            self.speed_m_s = self._compute_gs()
 
             self.alt_history.append(self.altitude_ft)
             self._broadcast_state()
@@ -751,7 +788,7 @@ class AvionicsApp(tk.Tk):
 
         row2 = tk.Frame(f, bg=COLORS["panel"])
         row2.pack(fill="x")
-        self.scr_speed,   _ = self._screen(row2, "VITESSE (m/s)")
+        self.scr_speed,   _ = self._screen(row2, "VITESSE SOL GS (m/s)")
         self.scr_attack,  _ = self._screen(row2, "ANGLE ATTAQUE (°)")
         self.scr_desired, _ = self._screen(row2, "ALT. DÉSIRÉE (ft)")
 
