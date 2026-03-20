@@ -1,25 +1,3 @@
-from panel.control_panel import ControlPanel
-from aggregateur.aggregateur import Aggregateur
-from calculateur.calculateur import Calculateur
-
-"""
-def main():
-
-    calculateur = Calculateur()
-    aggregateur = Aggregateur(calculateur)
-    panel = ControlPanel(aggregateur)
-
-    panel.run()
-
-
-if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\nSystem stopped")
-
-        """
-
 """
 AER8500 – Informatique embarquée de l'avionique
 Mini-Projet Hiver 2026 — Simulation complète
@@ -27,11 +5,9 @@ Protocoles : ARINC 429 + AFDX
 """
 
 import tkinter as tk
-from tkinter import ttk, font
 import threading
 import time
 import math
-import struct
 import json
 from datetime import datetime
 from collections import deque
@@ -62,6 +38,7 @@ STATE_NAMES = {
     STATE_VOL_CROISIERE: "VOL_CROISIÈRE",
 }
 
+
 # ─────────────────────────────────────────────
 #  ENCODAGE ARINC 429
 # ─────────────────────────────────────────────
@@ -71,10 +48,8 @@ class ARINC429:
       [1:8]   = label (octal, LSB first)
       [9:10]  = SDI
       [11:28] = données
-      [29]    = SSM bit 1
-      [30]    = SSM bit 2
+      [29:30] = SSM
       [31]    = parity (odd)
-      (bit 32 = unused / MSB)
     """
 
     @staticmethod
@@ -86,7 +61,7 @@ class ARINC429:
     def encode_label001_altitude(altitude_ft: int, state: int) -> int:
         """
         Label 001 — Altitude + État
-          Altitude  → bits [13:28]  (16 bits, binaire, résolution 1 pied)
+          Altitude  → bits [13:28]  (16 bits binaire, résolution 1 pied)
           État      → bits [11:12]  (2 bits)
           Label     → bits [1:8]    = 0x01
         """
@@ -95,13 +70,13 @@ class ARINC429:
         if state not in (0, 1, 2):
             raise ValueError(f"État invalide : {state}")
 
-        label = 0b00000001                       # label 001 (octal 001 = 0x01)
-        state_bits = (state & 0x3) << 10         # bits 11:12 (0-indexé bit 10,11)
-        alt_bits   = (altitude_ft & 0xFFFF) << 12  # bits 13:28 (0-indexé 12..27)
+        label      = 0b00000001
+        state_bits = (state & 0x3) << 10
+        alt_bits   = (altitude_ft & 0xFFFF) << 12
 
-        word = label | state_bits | alt_bits
+        word   = label | state_bits | alt_bits
         parity = ARINC429.odd_parity(word & 0x7FFFFFFF)
-        word |= (parity << 31)
+        word  |= (parity << 31)
         return word & 0xFFFFFFFF
 
     @staticmethod
@@ -135,13 +110,10 @@ class ARINC429:
 
     @staticmethod
     def encode_label002_climb(climb_m_min: float) -> int:
-        """
-        Label 002 — Taux de montée (BCD 4 chiffres, résolution 0.1 m/min)
-        bits [9:28] = BCD (4 chiffres + signe)
-        """
-        label = 0b00000010
-        bcd   = ARINC429.encode_bcd(climb_m_min, 4, 1)   # 4 chiffres, 1 décimale
-        word  = label | (bcd << 8)
+        """Label 002 — Taux de montée BCD 4 chiffres, résolution 0.1 m/min"""
+        label  = 0b00000010
+        bcd    = ARINC429.encode_bcd(climb_m_min, 4, 1)
+        word   = label | (bcd << 8)
         parity = ARINC429.odd_parity(word & 0x7FFFFFFF)
         word  |= (parity << 31)
         return word & 0xFFFFFFFF
@@ -153,13 +125,10 @@ class ARINC429:
 
     @staticmethod
     def encode_label003_attack(angle_deg: float) -> int:
-        """
-        Label 003 — Angle d'attaque (BCD 3 chiffres, résolution 0.1 deg)
-        bits [9:24] = BCD (3 chiffres + signe)
-        """
-        label = 0b00000011
-        bcd   = ARINC429.encode_bcd(angle_deg, 3, 1)
-        word  = label | (bcd << 8)
+        """Label 003 — Angle d'attaque BCD 3 chiffres, résolution 0.1°"""
+        label  = 0b00000011
+        bcd    = ARINC429.encode_bcd(angle_deg, 3, 1)
+        word   = label | (bcd << 8)
         parity = ARINC429.odd_parity(word & 0x7FFFFFFF)
         word  |= (parity << 31)
         return word & 0xFFFFFFFF
@@ -196,17 +165,18 @@ class AFDXNetwork:
     def _build_frame(self, src: str, dst: str, payload: dict) -> dict:
         return {
             "timestamp": datetime.now().isoformat(),
-            "src": src,
-            "dst": dst,
-            "payload": payload,
+            "src":       src,
+            "dst":       dst,
+            "payload":   payload,
         }
 
     def send(self, src: str, dst: str, payload: dict):
-        """Envoie sur les deux canaux (redondance)."""
+        """Envoie sur les deux canaux (redondance A + B)."""
         frame = self._build_frame(src, dst, payload)
-        self.channel_a.append(json.dumps(frame))
-        self.channel_b.append(json.dumps(frame))
-        self.log.append(f"[AFDX] {src}→{dst} | {payload}")
+        serialised = json.dumps(frame)
+        self.channel_a.append(serialised)
+        self.channel_b.append(serialised)
+        self.log.append(f"[AFDX A+B] {src}→{dst} | {payload}")
 
     def receive(self, channel: str = 'A') -> dict | None:
         """Reçoit la trame la plus récente sur un canal (A ou B)."""
@@ -225,32 +195,47 @@ class AFDXNetwork:
 class AvionicsCalculator:
     """
     Implémente la machine à états et tous les algorithmes de calcul.
+
+    CORRECTIONS APPLIQUÉES :
+      [FIX-1] Thread-safety : threading.Lock() sur toutes les méthodes
+              partagées entre le thread UI et le thread de simulation.
+      [FIX-4] Chute libre : drapeau _stalling + gestion dédiée dans tick().
+      [FIX-5] Direction taux de montée : le signe de input_climb est
+              corrigé selon (desired_alt - altitude_ft) dans
+              set_desired_altitude(), et la décélération douce s'applique
+              même au taux manuel.
     """
 
     def __init__(self, afdx: AFDXNetwork):
         self.afdx = afdx
 
+        # [FIX-1] Verrou partagé entre thread UI et thread simulation
+        self._lock = threading.Lock()
+
         # État interne
         self.state           = STATE_AU_SOL
-        self.altitude_ft     = 0.0          # altitude courante (pieds)
-        self.climb_m_min     = 0.0          # taux de montée courant (m/min)
-        self.attack_deg      = 0.0          # angle d'attaque courant (degrés)
-        self.motor_power_pct = 0.0          # puissance moteur (%)
-        self.speed_m_s       = 0.0          # vitesse horizontale (m/s) — affichage
+        self.altitude_ft     = 0.0
+        self.climb_m_min     = 0.0
+        self.attack_deg      = 0.0
+        self.motor_power_pct = 0.0
+        self.speed_m_s       = 0.0
 
         # Consignes
         self.desired_alt_ft  = 0.0
-        self.input_climb     = 0.0          # consigne taux montée (0 = auto)
-        self.input_attack    = 0.0          # consigne angle attaque (0 = auto)
+        self.input_climb     = 0.0   # consigne taux montée (0 = auto)
+        self.input_attack    = 0.0   # consigne angle attaque (0 = auto)
 
-        # Messages d'erreur
+        # [FIX-4] Drapeau de chute libre
+        self._stalling       = False
+
+        # Messages
         self.error_msg       = ""
         self.warnings        = []
 
         # Historique pour affichage
         self.alt_history     = deque(maxlen=120)
 
-    # ── Validation des entrées ────────────────
+    # ── Validation des entrées (stateless, pas de lock nécessaire) ─────
     def validate_altitude(self, value: str) -> tuple[bool, float, str]:
         try:
             v = float(value)
@@ -261,7 +246,7 @@ class AvionicsCalculator:
         return True, v, ""
 
     def validate_climb(self, value: str) -> tuple[bool, float, str]:
-        if value.strip() == "" or value.strip() == "0":
+        if value.strip() in ("", "0"):
             return True, 0.0, ""
         try:
             v = float(value)
@@ -272,7 +257,7 @@ class AvionicsCalculator:
         return True, v, ""
 
     def validate_attack(self, value: str) -> tuple[bool, float, str]:
-        if value.strip() == "" or value.strip() == "0":
+        if value.strip() in ("", "0"):
             return True, 0.0, ""
         try:
             v = float(value)
@@ -282,207 +267,356 @@ class AvionicsCalculator:
             return False, 0.0, f"Angle d'attaque hors limites [±{ATTACK_MAX}]°"
         return True, v, ""
 
-    # ── Calcul du taux de montée nominal ──────
-    def compute_nominal_climb(self) -> float:
+    # ── Reset sécurisé (bouton ATTERRIR) ──────────────────────────────
+    def reset(self):
+        """[FIX-1][FIX-4] Remet le système à zéro de manière thread-safe.
+        Envoie une trame AFDX immédiate pour que l'agrégateur se synchronise
+        sans attendre le prochain tick (évite altitude/erreur bloquées)."""
+        with self._lock:
+            self.state           = STATE_AU_SOL
+            self.altitude_ft     = 0.0
+            self.desired_alt_ft  = 0.0
+            self.climb_m_min     = 0.0
+            self.attack_deg      = 0.0
+            self.motor_power_pct = 0.0
+            self.speed_m_s       = 0.0
+            self.input_climb     = 0.0
+            self.input_attack    = 0.0
+            self.error_msg       = ""
+            self.warnings        = []
+            self._stalling       = False
+            # Trame immédiate — l'agrégateur voit altitude=0 et error=""
+            # dès le prochain update(), sans attendre le tick suivant.
+            self._broadcast_state()
+
+    # ── Calcul de l'angle d'attaque auto ──────────────────────────────
+    def compute_auto_attack(self, climb: float) -> float:
         """
-        Taux de montée = 100 m/min par 10% de puissance moteur.
-        Si on approche de l'altitude désirée, on décélère progressivement (rampe).
-        """
-        base_climb = (self.motor_power_pct / 10.0) * 100.0   # m/min
-
-        # Direction : montée ou descente
-        delta_ft = self.desired_alt_ft - self.altitude_ft
-        if abs(delta_ft) < 0.1:
-            return 0.0
-        direction = 1.0 if delta_ft > 0 else -1.0
-
-        # Décélération douce à l'approche de l'altitude cible
-        delta_m = delta_ft / FT_PER_M
-        slow_zone_m = base_climb * 0.8   # zone de décélération (en mètres)
-        if slow_zone_m < 1:
-            slow_zone_m = 1
-        if abs(delta_m) < slow_zone_m:
-            factor = abs(delta_m) / slow_zone_m
-            factor = max(0.05, factor)   # minimum 5% pour ne pas stagner
-        else:
-            factor = 1.0
-
-        return direction * base_climb * factor
-
-    # ── Calcul de l'angle d'attaque auto ──────
-    def compute_auto_attack(self) -> float:
-        """
-        Angle d'attaque basé sur le taux de montée normalisé.
-        montée max → +15°, descente max → -15°, croisière → 0°
-        Limité à ±15° (seuil de décrochage)
+        Angle proportionnel au taux de montée normalisé.
+        Limité à ±(STALL_ANGLE - 0.1)° pour éviter le décrochage en auto.
+        Prend le taux de montée en paramètre pour éviter toute dépendance
+        circulaire (l'angle est toujours calculé APRÈS le taux final).
         """
         if CLIMB_MAX_M_MIN == 0:
             return 0.0
-        angle = (self.climb_m_min / CLIMB_MAX_M_MIN) * STALL_ANGLE
-        return max(-STALL_ANGLE, min(STALL_ANGLE, angle))
+        safe_limit = STALL_ANGLE - 0.1
+        angle = (climb / CLIMB_MAX_M_MIN) * safe_limit
+        return max(-safe_limit, min(safe_limit, angle))
 
-    # ── Machine à états ───────────────────────
+    # ── Machine à états ───────────────────────────────────────────────
     def set_desired_altitude(self, alt_ft: float, climb: float, attack: float):
-        """Point d'entrée principal : nouvelle consigne de l'utilisateur."""
-        self.warnings = []
+        """[FIX-1][FIX-4][FIX-5] Point d'entrée principal thread-safe."""
+        with self._lock:
+            # [FIX-4] Commandes bloquées en cas de décrochage
+            if self._stalling:
+                self.error_msg = "⚠ DÉCROCHAGE — Commandes bloquées. Utilisez ATTERRIR."
+                return
 
-        # Décrochage
-        if abs(attack) >= STALL_ANGLE:
-            self.warnings.append(f"⚠ Risque de décrochage ! Angle = {attack}°")
+            self.warnings  = []
+            self.error_msg = ""
 
-        self.desired_alt_ft = alt_ft
-        self.input_climb    = climb
-        self.input_attack   = attack
+            if abs(attack) >= STALL_ANGLE:
+                self.warnings.append(f"⚠ Risque de décrochage ! Angle = {attack}°")
 
-        if self.state == STATE_AU_SOL:
-            # Cas 1 : altitude fournie, taux/angle nuls → auto
-            if alt_ft > 0 and climb == 0.0 and attack == 0.0:
-                self.motor_power_pct = 50.0    # puissance initiale 50%
-                self._transition_to(STATE_CHANGEMENT)
-            # Cas 2 : altitude + taux + angle tous non nuls
-            elif alt_ft > 0 and climb != 0.0 and attack != 0.0:
-                self.motor_power_pct = 50.0
-                self._transition_to(STATE_CHANGEMENT)
+            self.desired_alt_ft = alt_ft
+            angle_max = STALL_ANGLE - CLIMB_RES  # 14.9°
+
+            if climb != 0.0:
+                # Input taux de montée → back-calcul de l'angle correspondant
+                # à partir de la puissance moteur courante :
+                #   angle = (climb / min(power×10, 800)) × 14.9
+                ceil = min(self.motor_power_pct * 10.0, CLIMB_MAX_M_MIN)
+                if ceil > 0:
+                    angle_from_climb = (climb / ceil) * angle_max
+                    angle_from_climb = max(-angle_max, min(angle_max, angle_from_climb))
+                    self.input_attack = angle_from_climb
+                    self.warnings.append(
+                        f"↺ Taux {climb:+.1f} m/min → angle calculé : "
+                        f"{angle_from_climb:+.1f}°")
+                else:
+                    self.error_msg = "Puissance moteur nulle — augmentez la puissance avant d'entrer un taux de montée"
+                    return
+            elif attack != 0.0:
+                # Input angle direct
+                self.input_attack = attack
             else:
-                self.error_msg = "AU_SOL : fournir une altitude > 0 (et optionnellement taux + angle non nuls)"
+                # Mode auto
+                self.input_attack = 0.0
 
-        elif self.state == STATE_CHANGEMENT:
-            # On réagit immédiatement à la nouvelle consigne
-            if alt_ft == self.altitude_ft:
-                self._transition_to(STATE_VOL_CROISIERE)
+            if self.state == STATE_AU_SOL:
+                if alt_ft > 0 and climb == 0.0 and attack == 0.0:
+                    self.motor_power_pct = 50.0
+                    self._transition_to(STATE_CHANGEMENT)
+                elif alt_ft > 0 and climb != 0.0 and attack != 0.0:
+                    self.motor_power_pct = 50.0
+                    self._transition_to(STATE_CHANGEMENT)
+                else:
+                    self.error_msg = ("AU_SOL : fournir altitude > 0 "
+                                      "(et optionnellement taux + angle non nuls)")
 
-        elif self.state == STATE_VOL_CROISIERE:
-            if alt_ft != self.altitude_ft:
-                self._transition_to(STATE_CHANGEMENT)
+            elif self.state == STATE_CHANGEMENT:
+                if alt_ft == self.altitude_ft:
+                    self._transition_to(STATE_VOL_CROISIERE)
+
+            elif self.state == STATE_VOL_CROISIERE:
+                if alt_ft != self.altitude_ft:
+                    self._transition_to(STATE_CHANGEMENT)
 
     def set_motor_power(self, pct: float):
-        self.motor_power_pct = max(0.0, min(100.0, pct))
+        """[FIX-1] Thread-safe."""
+        with self._lock:
+            self.motor_power_pct = max(0.0, min(100.0, pct))
 
     def _transition_to(self, new_state: int):
+        """Transition d'état + notification AFDX. Appelée dans le lock."""
         old = STATE_NAMES[self.state]
         self.state = new_state
         new = STATE_NAMES[new_state]
         self.afdx.send("CALCULATEUR", "AGGREGATEUR",
                         {"event": "state_change", "from": old, "to": new})
 
-    # ── Tick de simulation ────────────────────
+    # ── Tick de simulation ────────────────────────────────────────────
     def tick(self, dt: float):
-        """Mise à jour physique du système (dt en secondes)."""
-        if self.state == STATE_AU_SOL:
-            self.altitude_ft  = 0.0
-            self.climb_m_min  = 0.0
-            self.attack_deg   = 0.0
-            self.speed_m_s    = 0.0
-            self.alt_history.append(0.0)
-            return
+        """[FIX-1][FIX-4][FIX-5] Mise à jour physique thread-safe."""
+        with self._lock:
 
-        if self.state == STATE_VOL_CROISIERE:
-            self.climb_m_min = 0.0
-            # Maintenir altitude constante
+            # ── [FIX-4] Chute libre ──────────────────────────────────
+            if self._stalling:
+                self.climb_m_min = -CLIMB_MAX_M_MIN
+                self.attack_deg  = STALL_ANGLE
+                climb_ft_s       = (self.climb_m_min * FT_PER_M) / 60.0
+                self.altitude_ft = max(0.0, self.altitude_ft + climb_ft_s * dt)
+
+                if self.altitude_ft <= 0.0:
+                    self._stalling   = False
+                    self.altitude_ft = 0.0
+                    self.error_msg   = "⚠ IMPACT AU SOL suite au décrochage"
+                    self._transition_to(STATE_AU_SOL)
+
+                self.alt_history.append(self.altitude_ft)
+                self._broadcast_state()
+                return
+
+            # ── AU_SOL ───────────────────────────────────────────────
+            if self.state == STATE_AU_SOL:
+                self.altitude_ft  = 0.0
+                self.climb_m_min  = 0.0
+                self.attack_deg   = 0.0
+                self.speed_m_s    = 0.0
+                self.alt_history.append(0.0)
+                # Broadcast indispensable : met à jour le cache de
+                # l'agrégateur après un reset (sinon altitude et messages
+                # d'erreur restent figés à la dernière valeur connue).
+                self._broadcast_state()
+                return
+
+            # ── VOL_CROISIÈRE ────────────────────────────────────────
+            if self.state == STATE_VOL_CROISIERE:
+                self.climb_m_min = 0.0
+                self.alt_history.append(self.altitude_ft)
+                self._broadcast_state()
+                return
+
+            # ── CHANGEMENT_ALT ───────────────────────────────────────
+            #
+            # Modèle retenu :
+            #   climb = base(puissance) × (angle / (STALL_ANGLE - résolution))
+            #
+            #   +14.9° → facteur +1.0 → taux plein positif  (+800 à 80%)
+            #    +7.0° → facteur +0.47 → taux partiel
+            #     0°   → mode auto : direction vers la cible, facteur 1.0
+            #    -7.0° → facteur -0.47 → descente partielle
+            #   -14.9° → facteur -1.0 → taux plein négatif  (-800 à 80%)
+            #   ±15°   → décrochage
+
+            # Relation : climb = min(base_power, CLIMB_MAX) × (angle / angle_max)
+            #
+            #   base_power = (power% / 10) × 100   [formule énoncé]
+            #   angle_max  = STALL_ANGLE - résolution = 14.9°  [max légal]
+            #
+            #   Puissance ≤ 80% → plafond = base_power  (puissance utile)
+            #   Puissance > 80% → plafond = 800 m/min   (saturation)
+            #   Angle      → fraction du plafond, signe = direction
+            #
+            #   Exemples à 80% :
+            #     +14.9° → 800 × 1.00 = +800 m/min
+            #      +7.0° → 800 × 0.47 = +376 m/min
+            #      -7.0° → 800 × -0.47 = -376 m/min
+            #     -14.9° → 800 × -1.00 = -800 m/min
+
+            angle_max      = STALL_ANGLE - CLIMB_RES          # 14.9°
+            base_power     = (self.motor_power_pct / 10.0) * 100.0
+            effective_ceil = min(base_power, CLIMB_MAX_M_MIN)  # sature à 800
+            delta_ft       = self.desired_alt_ft - self.altitude_ft
+
+            if self.input_attack != 0.0:
+                # MODE MANUEL — angle pilote direction ET fraction du plafond
+                raw_climb = effective_ceil * (self.input_attack / angle_max)
+            else:
+                # MODE AUTO — plafond plein, direction vers la cible
+                direction = 1.0 if delta_ft >= 0 else -1.0
+                raw_climb = direction * effective_ceil
+
+            # Décélération douce à l'approche de la cible
+            if abs(delta_ft) < 0.1:
+                self.climb_m_min = 0.0
+            else:
+                delta_m     = delta_ft / FT_PER_M
+                slow_zone_m = max(1.0, abs(raw_climb) * 0.8)
+                factor      = (max(0.05, abs(delta_m) / slow_zone_m)
+                               if abs(delta_m) < slow_zone_m else 1.0)
+                self.climb_m_min = raw_climb * factor
+
+            self.climb_m_min = max(-CLIMB_MAX_M_MIN,
+                                   min(CLIMB_MAX_M_MIN, self.climb_m_min))
+
+            # Angle d'attaque — calculé depuis le taux final (sens unique)
+            if self.input_attack != 0.0:
+                self.attack_deg = self.input_attack
+            else:
+                self.attack_deg = self.compute_auto_attack(self.climb_m_min)
+
+            # [FIX-4] Détecter le décrochage (angle ≥ seuil)
+            if abs(self.attack_deg) >= STALL_ANGLE:
+                self._stalling = True
+                self.error_msg = (f"⚠ DÉCROCHAGE ! angle={self.attack_deg:.1f}° "
+                                  f"— Chute libre initiée")
+                self.alt_history.append(self.altitude_ft)
+                self._broadcast_state()
+                return
+
+            # Mise à jour altitude
+            climb_ft_s        = (self.climb_m_min * FT_PER_M) / 60.0
+            self.altitude_ft += climb_ft_s * dt
+
+            # Bornes altitude
+            if self.altitude_ft >= ALT_MAX_FT:
+                self.altitude_ft = ALT_MAX_FT
+                self._transition_to(STATE_VOL_CROISIERE)
+            elif self.altitude_ft <= 0.0:
+                self.altitude_ft = 0.0
+                self._transition_to(STATE_AU_SOL)
+
+            # Altitude cible atteinte (tolérance 2 ft)
+            if (self.state == STATE_CHANGEMENT and
+                    abs(self.altitude_ft - self.desired_alt_ft) < 2.0):
+                self.altitude_ft = self.desired_alt_ft
+                self._transition_to(STATE_VOL_CROISIERE)
+
+            # Vitesse horizontale (approximation)
+            self.speed_m_s = (abs(self.climb_m_min / 60.0)
+                              * math.cos(math.radians(abs(self.attack_deg)))
+                              * 5.0)
+
             self.alt_history.append(self.altitude_ft)
             self._broadcast_state()
-            return
-
-        # ── CHANGEMENT_ALT ──
-        # Taux de montée
-        if self.input_climb != 0.0:
-            # L'utilisateur a imposé un taux
-            self.climb_m_min = self.input_climb
-        else:
-            self.climb_m_min = self.compute_nominal_climb()
-
-        # Clamp
-        self.climb_m_min = max(-CLIMB_MAX_M_MIN,
-                               min(CLIMB_MAX_M_MIN, self.climb_m_min))
-
-        # Angle d'attaque
-        if self.input_attack != 0.0:
-            self.attack_deg = self.input_attack
-        else:
-            self.attack_deg = self.compute_auto_attack()
-
-        # Décrochage ?
-        if abs(self.attack_deg) >= STALL_ANGLE:
-            if "décrochage" not in self.error_msg:
-                self.error_msg = f"⚠ DÉCROCHAGE ! angle={self.attack_deg:.1f}°"
-
-        # Mise à jour altitude (conversion m/min → ft/s)
-        climb_ft_s = (self.climb_m_min * FT_PER_M) / 60.0
-        self.altitude_ft += climb_ft_s * dt
-
-        # Bornes
-        if self.altitude_ft >= ALT_MAX_FT:
-            self.altitude_ft = ALT_MAX_FT
-            self._transition_to(STATE_VOL_CROISIERE)
-        elif self.altitude_ft <= 0.0:
-            self.altitude_ft = 0.0
-            self._transition_to(STATE_AU_SOL)
-
-        # Vérification altitude cible atteinte
-        delta = abs(self.altitude_ft - self.desired_alt_ft)
-        if delta < 2.0 and self.state == STATE_CHANGEMENT:
-            self.altitude_ft = self.desired_alt_ft
-            self._transition_to(STATE_VOL_CROISIERE)
-
-        # Vitesse horizontale (approximation)
-        self.speed_m_s = abs(self.climb_m_min / 60.0) * math.cos(
-            math.radians(abs(self.attack_deg))) * 5.0
-
-        self.alt_history.append(self.altitude_ft)
-        self._broadcast_state()
 
     def _broadcast_state(self):
-        """Encode et envoie les mots ARINC 429 via AFDX."""
+        """
+        [FIX-3] Encode les mots ARINC 429 et enrichit le payload AFDX
+        avec les métadonnées nécessaires à l'agrégateur
+        (desired_alt, power, speed, warnings, error).
+        """
         try:
-            w001 = ARINC429.encode_label001_altitude(
-                int(self.altitude_ft), self.state)
+            w001 = ARINC429.encode_label001_altitude(int(self.altitude_ft),
+                                                     self.state)
             w002 = ARINC429.encode_label002_climb(self.climb_m_min)
             w003 = ARINC429.encode_label003_attack(self.attack_deg)
             payload = {
-                "label001": ARINC429.word_to_hex(w001),
-                "label002": ARINC429.word_to_hex(w002),
-                "label003": ARINC429.word_to_hex(w003),
-                "alt_ft":   round(self.altitude_ft, 1),
-                "climb":    round(self.climb_m_min, 1),
-                "attack":   round(self.attack_deg, 2),
-                "power":    round(self.motor_power_pct, 1),
-                "state":    STATE_NAMES[self.state],
+                # Mots ARINC 429 sur le bus
+                "label001":    ARINC429.word_to_hex(w001),
+                "label002":    ARINC429.word_to_hex(w002),
+                "label003":    ARINC429.word_to_hex(w003),
+                # Métadonnées AFDX (hors ARINC)
+                "power":       round(self.motor_power_pct, 1),
+                "speed":       round(self.speed_m_s, 2),
+                "desired_alt": round(self.desired_alt_ft, 0),
+                "warnings":    list(self.warnings),
+                "error":       self.error_msg,
             }
             self.afdx.send("CALCULATEUR", "AGGREGATEUR", payload)
         except Exception:
-            pass   # silencieux pour éviter de bloquer la sim
+            pass   # silencieux pour éviter de bloquer la simulation
 
 
 # ─────────────────────────────────────────────
 #  AGRÉGATEUR
 # ─────────────────────────────────────────────
 class Aggregator:
-    """Reçoit les données du calculateur et les expose au panneau."""
+    """
+    [FIX-3] L'agrégateur décode maintenant les trames AFDX reçues
+    (labels ARINC 429) au lieu d'accéder directement aux attributs
+    du calculateur.  Failover automatique canal A → canal B.
+    """
 
     def __init__(self, afdx: AFDXNetwork, calculator: AvionicsCalculator):
         self.afdx       = afdx
-        self.calc       = calculator
-        self.last_frame = None
+        self.calc       = calculator  # conservé uniquement pour reset()
+        self._lock      = threading.Lock()
+        # Cache interne — initialisé à des valeurs neutres
+        self._data: dict = {
+            "altitude":  0.0,
+            "climb":     0.0,
+            "power":     0.0,
+            "speed":     0.0,
+            "attack":    0.0,
+            "state":     "AU_SOL",
+            "state_id":  STATE_AU_SOL,
+            "desired":   0.0,
+            "warnings":  [],
+            "error":     "",
+            # Mots ARINC bruts (pour l'affichage hex)
+            "w001_hex":  "0x00000000",
+            "w002_hex":  "0x00000000",
+            "w003_hex":  "0x00000000",
+        }
 
     def update(self):
-        frame = self.afdx.receive('A')
-        if frame:
-            self.last_frame = frame
+        """[FIX-3] Décode les labels ARINC 429 depuis les trames AFDX.
+        Failover automatique : tente canal A puis canal B."""
+        frame = self.afdx.receive('A') or self.afdx.receive('B')
+        if not frame:
+            return
+
+        p = frame.get("payload", {})
+        # Ignorer les trames d'événements (state_change) sans labels ARINC
+        if "label001" not in p:
+            return
+
+        try:
+            w001 = int(p["label001"], 16)
+            w002 = int(p["label002"], 16)
+            w003 = int(p["label003"], 16)
+
+            # Décodage ARINC 429
+            alt_ft, state_id = ARINC429.decode_label001(w001)
+            climb            = ARINC429.decode_label002(w002)
+            attack           = ARINC429.decode_label003(w003)
+
+            with self._lock:
+                self._data.update({
+                    "altitude":  float(alt_ft),
+                    "climb":     climb,
+                    "attack":    attack,
+                    "state_id":  state_id,
+                    "state":     STATE_NAMES.get(state_id, "INCONNU"),
+                    "power":     p.get("power",       0.0),
+                    "speed":     p.get("speed",        0.0),
+                    "desired":   p.get("desired_alt",  0.0),
+                    "warnings":  p.get("warnings",     []),
+                    "error":     p.get("error",        ""),
+                    # Mots bruts pour affichage hex
+                    "w001_hex":  p["label001"],
+                    "w002_hex":  p["label002"],
+                    "w003_hex":  p["label003"],
+                })
+        except Exception:
+            pass
 
     def get_display_data(self) -> dict:
-        """Renvoie les valeurs à afficher sur le panneau."""
-        return {
-            "altitude":  round(self.calc.altitude_ft, 0),
-            "climb":     round(self.calc.climb_m_min, 1),
-            "power":     round(self.calc.motor_power_pct, 1),
-            "speed":     round(self.calc.speed_m_s, 2),
-            "attack":    round(self.calc.attack_deg, 2),
-            "state":     STATE_NAMES[self.calc.state],
-            "state_id":  self.calc.state,
-            "desired":   round(self.calc.desired_alt_ft, 0),
-            "warnings":  self.calc.warnings[:],
-            "error":     self.calc.error_msg,
-        }
+        """Retourne un snapshot thread-safe des données décodées."""
+        with self._lock:
+            return dict(self._data)
 
 
 # ─────────────────────────────────────────────
@@ -523,17 +657,20 @@ class AvionicsApp(tk.Tk):
         self.calculator = AvionicsCalculator(self.afdx)
         self.aggregator = Aggregator(self.afdx, self.calculator)
 
+        # Altitude mise en cache pour _draw_alt_bar (évite l'accès direct
+        # au calculateur depuis le thread UI)
+        self._last_alt_ft: float = 0.0
+
         # Thread de simulation
-        self._running   = True
+        self._running    = True
         self._sim_thread = threading.Thread(target=self._sim_loop, daemon=True)
 
         self._build_ui()
         self._sim_thread.start()
         self._update_ui()
 
-    # ── Build UI ─────────────────────────────
+    # ── Build UI ─────────────────────────────────────────────────────
     def _build_ui(self):
-        # Titre
         title_bar = tk.Frame(self, bg=COLORS["bg"])
         title_bar.pack(fill="x", padx=16, pady=(12, 4))
         tk.Label(title_bar, text="✈  AER8500 — Informatique embarquée de l'avionique",
@@ -543,38 +680,32 @@ class AvionicsApp(tk.Tk):
                  font=("Courier New", 9),
                  bg=COLORS["bg"], fg=COLORS["text_dim"]).pack(side="right")
 
-        # Séparateur
         sep = tk.Frame(self, bg=COLORS["border"], height=1)
         sep.pack(fill="x", padx=16)
 
-        # Corps principal
         main = tk.Frame(self, bg=COLORS["bg"])
         main.pack(fill="both", expand=True, padx=16, pady=10)
 
         left  = tk.Frame(main, bg=COLORS["bg"])
         right = tk.Frame(main, bg=COLORS["bg"])
-        left.pack(side="left", fill="both", expand=True)
+        left.pack(side="left",  fill="both", expand=True)
         right.pack(side="right", fill="both", expand=True, padx=(12, 0))
 
-        # ── Colonne gauche ──
         self._build_state_display(left)
         self._build_screens(left)
         self._build_arinc_display(left)
 
-        # ── Colonne droite ──
         self._build_input_panel(right)
         self._build_motor_panel(right)
         self._build_afdx_log(right)
         self._build_altitude_bar(right)
 
-        # ── Barre d'erreur ──
         self.error_bar = tk.Label(self, text="", font=("Courier New", 9, "bold"),
                                   bg="#300", fg=COLORS["red"],
                                   anchor="w", padx=10)
         self.error_bar.pack(fill="x", padx=16, pady=(0, 8))
 
     def _section(self, parent, title: str) -> tk.Frame:
-        """Crée un cadre avec titre."""
         outer = tk.Frame(parent, bg=COLORS["panel"],
                          highlightbackground=COLORS["border"],
                          highlightthickness=1)
@@ -588,7 +719,6 @@ class AvionicsApp(tk.Tk):
         return inner
 
     def _screen(self, parent, label: str, width=14):
-        """Widget d'affichage style LCD."""
         f = tk.Frame(parent, bg=COLORS["panel"])
         f.pack(side="left", padx=6, pady=4)
         tk.Label(f, text=label, font=("Courier New", 8),
@@ -621,9 +751,9 @@ class AvionicsApp(tk.Tk):
 
         row2 = tk.Frame(f, bg=COLORS["panel"])
         row2.pack(fill="x")
-        self.scr_speed,  _ = self._screen(row2, "VITESSE (m/s)")
-        self.scr_attack, _ = self._screen(row2, "ANGLE ATTAQUE (°)")
-        self.scr_desired,_ = self._screen(row2, "ALT. DÉSIRÉE (ft)")
+        self.scr_speed,   _ = self._screen(row2, "VITESSE (m/s)")
+        self.scr_attack,  _ = self._screen(row2, "ANGLE ATTAQUE (°)")
+        self.scr_desired, _ = self._screen(row2, "ALT. DÉSIRÉE (ft)")
 
     def _build_arinc_display(self, parent):
         f = self._section(parent, "MOTS ARINC 429 (hex)")
@@ -644,11 +774,10 @@ class AvionicsApp(tk.Tk):
 
     def _build_input_panel(self, parent):
         f = self._section(parent, "PANNEAU DE CONTRÔLE")
-
         inputs = [
-            ("Altitude désirée (ft) [0–40000]",   "alt"),
-            ("Taux de montée (m/min) [±800]",      "climb"),
-            ("Angle d'attaque (°)   [±16]",        "attack"),
+            ("Altitude désirée (ft) [0–40000]", "alt"),
+            ("Taux de montée (m/min) [±800]",   "climb"),
+            ("Angle d'attaque (°)   [±16]",     "attack"),
         ]
         self.input_vars = {}
         for label, key in inputs:
@@ -714,35 +843,28 @@ class AvionicsApp(tk.Tk):
         self.alt_canvas.pack(fill="x", padx=4, pady=4)
         self.alt_canvas.bind("<Configure>", self._draw_alt_bar)
 
-    # ── Callbacks ────────────────────────────
+    # ── Callbacks ────────────────────────────────────────────────────
     def _on_send(self):
-        """Lecture et validation des entrées, puis envoi au calculateur."""
+        """Lecture, validation des entrées, puis envoi au calculateur."""
         self.calculator.error_msg = ""
 
-        ok_a, alt, err_a = self.calculator.validate_altitude(
+        ok_a, alt,    err_a = self.calculator.validate_altitude(
             self.input_vars["alt"].get())
-        ok_c, climb, err_c = self.calculator.validate_climb(
+        ok_c, climb,  err_c = self.calculator.validate_climb(
             self.input_vars["climb"].get())
         ok_k, attack, err_k = self.calculator.validate_attack(
             self.input_vars["attack"].get())
 
         errors = [e for e in [err_a, err_c, err_k] if e]
         if errors:
-            self.error_bar.config(text="  ✘  " + " | ".join(errors),
-                                  bg="#300")
+            self.error_bar.config(text="  ✘  " + " | ".join(errors), bg="#300")
             return
         self.error_bar.config(text="", bg=COLORS["bg"])
         self.calculator.set_desired_altitude(alt, climb, attack)
 
     def _on_land(self):
-        """Forcer retour AU_SOL."""
-        self.calculator.state        = STATE_AU_SOL
-        self.calculator.altitude_ft  = 0.0
-        self.calculator.desired_alt_ft = 0.0
-        self.calculator.climb_m_min  = 0.0
-        self.calculator.attack_deg   = 0.0
-        self.calculator.motor_power_pct = 0.0
-        self.calculator.error_msg    = ""
+        """[FIX-1][FIX-4] Réinitialisation via reset() thread-safe."""
+        self.calculator.reset()
         self.power_slider.set(0)
         self.input_vars["alt"].set("")
         self.input_vars["climb"].set("")
@@ -750,18 +872,22 @@ class AvionicsApp(tk.Tk):
         self.error_bar.config(text="", bg=COLORS["bg"])
 
     def _on_power_change(self, val):
+        """[FIX-1] Passe par set_motor_power() protégé."""
         self.calculator.set_motor_power(float(val))
 
-    # ── Boucle simulation (thread) ────────────
+    # ── Boucle simulation (thread dédié) ────────────────────────────
     def _sim_loop(self):
         while self._running:
             self.calculator.tick(SIM_TICK_S)
             self.aggregator.update()
             time.sleep(SIM_TICK_S)
 
-    # ── Mise à jour UI ────────────────────────
+    # ── Mise à jour UI ───────────────────────────────────────────────
     def _update_ui(self):
         data = self.aggregator.get_display_data()
+
+        # Mise en cache pour _draw_alt_bar (évite accès direct au calc)
+        self._last_alt_ft = data["altitude"]
 
         # Mode
         sid = data["state_id"]
@@ -776,17 +902,10 @@ class AvionicsApp(tk.Tk):
         self.scr_attack.set(f"{data['attack']:+.2f}")
         self.scr_desired.set(f"{data['desired']:,.0f}")
 
-        # Mots ARINC 429
-        try:
-            alt_i = int(data["altitude"])
-            w001  = ARINC429.encode_label001_altitude(alt_i, sid)
-            w002  = ARINC429.encode_label002_climb(data["climb"])
-            w003  = ARINC429.encode_label003_attack(data["attack"])
-            self.arinc_vars["001"].set(ARINC429.word_to_hex(w001))
-            self.arinc_vars["002"].set(ARINC429.word_to_hex(w002))
-            self.arinc_vars["003"].set(ARINC429.word_to_hex(w003))
-        except Exception:
-            pass
+        # [FIX-3] Mots ARINC 429 — lus depuis les trames décodées
+        self.arinc_vars["001"].set(data.get("w001_hex", "0x00000000"))
+        self.arinc_vars["002"].set(data.get("w002_hex", "0x00000000"))
+        self.arinc_vars["003"].set(data.get("w003_hex", "0x00000000"))
 
         # Journal AFDX
         log = self.afdx.get_log(6)
@@ -800,7 +919,7 @@ class AvionicsApp(tk.Tk):
         self._draw_alt_bar()
 
         # Erreurs / avertissements
-        err = data.get("error", "")
+        err   = data.get("error",    "")
         warns = data.get("warnings", [])
         msg_parts = []
         if err:
@@ -808,30 +927,30 @@ class AvionicsApp(tk.Tk):
         if warns:
             msg_parts.extend(warns)
         if msg_parts:
-            self.error_bar.config(text="  ⚠  " + "  |  ".join(msg_parts),
-                                  bg="#300")
+            self.error_bar.config(text="  ⚠  " + "  |  ".join(msg_parts), bg="#300")
         elif not self.error_bar["text"].startswith("  ✘"):
             self.error_bar.config(text="", bg=COLORS["bg"])
 
         # Sync slider avec puissance calculateur
-        self.power_slider.set(int(self.calculator.motor_power_pct))
+        self.power_slider.set(int(data["power"]))
 
         self.after(100, self._update_ui)
 
     def _draw_alt_bar(self, event=None):
+        """[FIX-1] Utilise le cache _last_alt_ft — plus d'accès direct au calc."""
         c = self.alt_canvas
         c.delete("all")
         w = c.winfo_width()
         h = c.winfo_height()
         if w < 10 or h < 10:
             return
-        ratio = self.calculator.altitude_ft / ALT_MAX_FT
+
+        ratio = self._last_alt_ft / ALT_MAX_FT
         bar_w = int(w * ratio)
-        # Fond
+
         c.create_rectangle(0, 0, w, h, fill="#0a0f15", outline="")
-        # Barre
+
         if bar_w > 0:
-            # Dégradé de couleur : vert → jaune → rouge
             if ratio < 0.5:
                 r_val = int(255 * ratio * 2)
                 g_val = 180
@@ -839,14 +958,13 @@ class AvionicsApp(tk.Tk):
                 r_val = 200
                 g_val = int(180 * (1 - ratio) * 2)
             color = f"#{r_val:02x}{g_val:02x}30"
-            c.create_rectangle(0, 2, bar_w, h - 2,
-                                fill=color, outline="")
-        # Texte
+            c.create_rectangle(0, 2, bar_w, h - 2, fill=color, outline="")
+
         pct = ratio * 100
         c.create_text(w // 2, h // 2,
-                      text=f"{self.calculator.altitude_ft:,.0f} ft  ({pct:.1f}%)",
+                      text=f"{self._last_alt_ft:,.0f} ft  ({pct:.1f}%)",
                       fill=COLORS["text"], font=("Courier New", 9, "bold"))
-        # Graduation 25 / 50 / 75 %
+
         for mark in [0.25, 0.5, 0.75]:
             x = int(w * mark)
             c.create_line(x, 0, x, h, fill=COLORS["border"], width=1)
