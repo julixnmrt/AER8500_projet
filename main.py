@@ -20,10 +20,13 @@ ALT_MIN_FT       = 0
 CLIMB_MAX_M_MIN  = 800.0      # m/min
 CLIMB_RES        = 0.1        # résolution taux de montée
 ALT_RES          = 1          # résolution altitude (pied)
-ATTACK_MAX       = 16.0       # degrés
-ATTACK_MIN       = -16.0
-STALL_ANGLE      = 15.0       # angle de décrochage
+STALL_ANGLE      = 15.0       # angle de décrochage positif (°)
 CRUISE_ANGLE     = 3.0        # angle d'attaque en vol de croisière (palier)
+# Décrochage négatif : angle en dessous duquel l'avion décroche en descente
+# = CRUISE_ANGLE - (STALL_ANGLE - CLIMB_RES - CRUISE_ANGLE) - CLIMB_RES = -9.0°
+NEG_STALL_ANGLE  = CRUISE_ANGLE - (STALL_ANGLE - CLIMB_RES - CRUISE_ANGLE) - CLIMB_RES
+ATTACK_MAX       = STALL_ANGLE              # 15.0° — permet la démo du décrochage positif
+ATTACK_MIN       = -(STALL_ANGLE)           # -15.0° — permet la démo du décrochage négatif
 MAX_SPEED_M_S    = 150.0      # vitesse sol max à 100% puissance (m/s ≈ 540 km/h)
 SIM_TICK_S       = 0.05       # secondes par tick de simulation
 
@@ -201,11 +204,9 @@ class AvionicsCalculator:
     CORRECTIONS APPLIQUÉES :
       [FIX-1] Thread-safety : threading.Lock() sur toutes les méthodes
               partagées entre le thread UI et le thread de simulation.
+      [FIX-3] Agrégateur décode les trames AFDX (ARINC 429) au lieu
+              d'accéder directement aux attributs du calculateur.
       [FIX-4] Chute libre : drapeau _stalling + gestion dédiée dans tick().
-      [FIX-5] Direction taux de montée : le signe de input_climb est
-              corrigé selon (desired_alt - altitude_ft) dans
-              set_desired_altitude(), et la décélération douce s'applique
-              même au taux manuel.
     """
 
     def __init__(self, afdx: AFDXNetwork):
@@ -224,7 +225,6 @@ class AvionicsCalculator:
 
         # Consignes
         self.desired_alt_ft  = 0.0
-        self.input_climb     = 0.0   # consigne taux montée (0 = auto)
         self.input_attack    = 0.0   # consigne angle attaque (0 = auto)
 
         # [FIX-4] Drapeau de chute libre
@@ -239,6 +239,10 @@ class AvionicsCalculator:
 
     # ── Validation des entrées (stateless, pas de lock nécessaire) ─────
     def validate_altitude(self, value: str) -> tuple[bool, float, str]:
+        if value.strip() == "":
+            # Champ vide → garder l'altitude désirée courante (pour ne pas
+            # forcer la re-saisie quand on veut juste changer l'angle ou le taux)
+            return True, self.desired_alt_ft, ""
         try:
             v = float(value)
         except ValueError:
@@ -259,8 +263,8 @@ class AvionicsCalculator:
         return True, v, ""
 
     def validate_attack(self, value: str) -> tuple[bool, float, str]:
-        if value.strip() in ("", "0"):
-            return True, 0.0, ""
+        if value.strip() == "":
+            return True, 0.0, ""   # champ vide → auto
         try:
             v = float(value)
         except ValueError:
@@ -282,7 +286,6 @@ class AvionicsCalculator:
             self.attack_deg      = 0.0
             self.motor_power_pct = 0.0
             self.speed_m_s       = 0.0
-            self.input_climb     = 0.0
             self.input_attack    = 0.0
             self.error_msg       = ""
             self.warnings        = []
@@ -294,12 +297,15 @@ class AvionicsCalculator:
     # ── Calcul de l'angle d'attaque auto ──────────────────────────────
     def compute_auto_attack(self, climb: float) -> float:
         """
-        Angle d'attaque décalé autour de CRUISE_ANGLE :
+        Angle d'attaque automatique, décalé autour de CRUISE_ANGLE :
           angle = CRUISE_ANGLE + (climb / CLIMB_MAX) × (STALL_ANGLE - RES - CRUISE_ANGLE)
 
-          climb =    0  →  2.0°   (croisière, palier)
+          climb =    0  →  3.0°   (croisière, palier)
           climb = +800  → +14.9°  (montée maximale)
-          climb = -800  →  -10.9° (descente maximale, asymétrique = plus réaliste)
+          climb = -800  →  -8.9°  (descente maximale, asymétrique = plus réaliste)
+
+        Note : cet offset ne s'applique QU'en mode auto. Le mode manuel
+        utilise la formule directe climb = ceil × (angle / 14.9°).
         """
         if CLIMB_MAX_M_MIN == 0:
             return CRUISE_ANGLE
@@ -343,14 +349,15 @@ class AvionicsCalculator:
             angle_max = STALL_ANGLE - CLIMB_RES  # 14.9°
 
             if climb != 0.0:
-                # Back-calcul angle depuis taux de montée (formule inversée) :
-                #   angle = CRUISE_ANGLE + (climb / ceil) × angle_range
+                # Back-calcul angle depuis taux de montée — inverse EXACT de tick() :
+                #   tick()  : climb = ceil × (angle - CRUISE_ANGLE) / angle_range
+                #   ici     : angle = CRUISE_ANGLE + (climb / ceil) × angle_range
                 ceil = min(self.motor_power_pct * 10.0, CLIMB_MAX_M_MIN)
                 if ceil > 0:
-                    angle_range      = (STALL_ANGLE - CLIMB_RES) - CRUISE_ANGLE  # 12.9°
+                    angle_range      = STALL_ANGLE - CLIMB_RES - CRUISE_ANGLE  # 11.9°
                     angle_from_climb = CRUISE_ANGLE + (climb / ceil) * angle_range
-                    angle_max        = STALL_ANGLE - CLIMB_RES
-                    angle_from_climb = max(-angle_max, min(angle_max, angle_from_climb))
+                    # Clamp dans la plage valide (±STALL_ANGLE)
+                    angle_from_climb = max(-STALL_ANGLE, min(STALL_ANGLE, angle_from_climb))
                     self.input_attack = angle_from_climb
                     self.warnings.append(
                         f"↺ Taux {climb:+.1f} m/min → angle calculé : "
@@ -366,17 +373,18 @@ class AvionicsCalculator:
                 self.input_attack = 0.0
 
             if self.state == STATE_AU_SOL:
+                # Au sol, une altitude > 0 est obligatoire
+                if alt_ft <= 0:
+                    self.error_msg = ("AU_SOL : fournir une altitude > 0 pour décoller")
+                    return
                 # Cas 1 : altitude seule → mode auto
-                if alt_ft > 0 and self.input_attack == 0.0:
+                if self.input_attack == 0.0:
                     self.motor_power_pct = 50.0
                     self._transition_to(STATE_CHANGEMENT)
-                # Cas 2 : altitude + taux de montée OU angle (ou les deux)
-                elif alt_ft > 0 and self.input_attack != 0.0:
-                    self.motor_power_pct = 50.0
-                    self._transition_to(STATE_CHANGEMENT)
+                # Cas 2 : altitude + taux ou angle
                 else:
-                    self.error_msg = ("AU_SOL : fournir altitude > 0 "
-                                      "(et optionnellement taux ou angle non nuls)")
+                    self.motor_power_pct = 50.0
+                    self._transition_to(STATE_CHANGEMENT)
 
             elif self.state == STATE_CHANGEMENT:
                 if alt_ft == self.altitude_ft:
@@ -445,55 +453,38 @@ class AvionicsCalculator:
 
             # ── CHANGEMENT_ALT ───────────────────────────────────────
             #
-            # Modèle retenu :
-            #   climb = base(puissance) × (angle / (STALL_ANGLE - résolution))
+            # Formule UNIFIÉE (auto et manuel) :
+            #   climb = ceil × (angle - CRUISE_ANGLE) / angle_range
+            #   angle = CRUISE_ANGLE + (climb / ceil) × angle_range
             #
-            #   +14.9° → facteur +1.0 → taux plein positif  (+800 à 80%)
-            #    +7.0° → facteur +0.47 → taux partiel
-            #     0°   → mode auto : direction vers la cible, facteur 1.0
-            #    -7.0° → facteur -0.47 → descente partielle
-            #   -14.9° → facteur -1.0 → taux plein négatif  (-800 à 80%)
-            #   ±15°   → décrochage
+            #   angle_range = STALL_ANGLE - CLIMB_RES - CRUISE_ANGLE = 11.9°
+            #   ceil        = min(power×10, 800)
+            #
+            #   angle = +14.9° → climb = +ceil  (+800 à 80%)
+            #   angle = + 3.0° → climb =   0    (palier, croisière)
+            #   angle = - 8.9° → climb = -ceil  (-800 à 80%)
+            #   angle ≥ +15°   → décrochage positif
+            #   angle ≤ - 9.0° → décrochage négatif
 
-            # Relation : climb = min(base_power, CLIMB_MAX) × (angle / angle_max)
-            #
-            #   base_power = (power% / 10) × 100   [formule énoncé]
-            #   angle_max  = STALL_ANGLE - résolution = 14.9°  [max légal]
-            #
-            #   Puissance ≤ 80% → plafond = base_power  (puissance utile)
-            #   Puissance > 80% → plafond = 800 m/min   (saturation)
-            #   Angle      → fraction du plafond, signe = direction
-            #
-            #   Exemples à 80% :
-            #     +14.9° → 800 × 1.00 = +800 m/min
-            #      +7.0° → 800 × 0.47 = +376 m/min
-            #      -7.0° → 800 × -0.47 = -376 m/min
-            #     -14.9° → 800 × -1.00 = -800 m/min
-
-            angle_max      = STALL_ANGLE - CLIMB_RES          # 14.9°
+            angle_range    = STALL_ANGLE - CLIMB_RES - CRUISE_ANGLE  # 11.9°
             base_power     = (self.motor_power_pct / 10.0) * 100.0
-            effective_ceil = min(base_power, CLIMB_MAX_M_MIN)  # sature à 800
+            effective_ceil = min(base_power, CLIMB_MAX_M_MIN)
             delta_ft       = self.desired_alt_ft - self.altitude_ft
 
             if self.input_attack != 0.0:
-                # MODE MANUEL — angle pilote direction ET fraction du plafond
-                raw_climb = effective_ceil * (self.input_attack / angle_max)
+                # MODE MANUEL — formule avec offset CRUISE_ANGLE
+                raw_climb = effective_ceil * (self.input_attack - CRUISE_ANGLE) / angle_range
             else:
-                # MODE AUTO — plafond plein, direction vers la cible
+                # MODE AUTO — direction vers la cible, plafond plein
                 direction = 1.0 if delta_ft >= 0 else -1.0
                 raw_climb = direction * effective_ceil
 
-            # Décélération douce à l'approche de la cible
-            # Exception : pas de décélération si on atterrit (cible = 0 ft)
-            # car la transition AU_SOL se fait automatiquement via les bornes.
+            # Décélération douce à l'approche de la cible (montée ou descente)
             if abs(delta_ft) < 0.1:
                 self.climb_m_min = 0.0
-            elif self.desired_alt_ft <= ALT_MIN_FT:
-                # Atterrissage : vitesse constante jusqu'au sol
-                self.climb_m_min = raw_climb
             else:
                 delta_m     = delta_ft / FT_PER_M
-                slow_zone_m = max(1.0, abs(raw_climb) * 0.8)
+                slow_zone_m = max(1.0, abs(raw_climb) * 0.1)
                 factor      = (max(0.05, abs(delta_m) / slow_zone_m)
                                if abs(delta_m) < slow_zone_m else 1.0)
                 self.climb_m_min = raw_climb * factor
@@ -507,8 +498,12 @@ class AvionicsCalculator:
             else:
                 self.attack_deg = self.compute_auto_attack(self.climb_m_min)
 
-            # [FIX-4] Détecter le décrochage (angle ≥ seuil)
-            if abs(self.attack_deg) >= STALL_ANGLE:
+            # Détecter le décrochage :
+            #   positif : angle ≥ +STALL_ANGLE (+15°)
+            #   négatif : angle ≤  NEG_STALL_ANGLE (-9.0°)
+            stalled = (self.attack_deg >= STALL_ANGLE or
+                       self.attack_deg <= NEG_STALL_ANGLE)
+            if stalled:
                 self._stalling = True
                 self.error_msg = (f"⚠ DÉCROCHAGE ! angle={self.attack_deg:.1f}° "
                                   f"— Chute libre initiée")
