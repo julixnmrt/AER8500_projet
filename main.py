@@ -2,6 +2,8 @@ import tkinter as tk
 import threading
 import time
 from constantes import *
+import psutil
+import os
 
 from communication.afdx import AFDXNetwork
 from calculateur import AvionicsCalculator
@@ -40,7 +42,8 @@ class AvionicsApp(tk.Tk):
         self.afdx       = AFDXNetwork()
         self.calculator = AvionicsCalculator(self.afdx)
         self.aggregator = Aggregator(self.afdx, self.calculator)
-
+        self.process = psutil.Process(os.getpid())
+        
         self._last_alt_ft: float = 0.0
 
         # Thread de simulation
@@ -51,6 +54,7 @@ class AvionicsApp(tk.Tk):
         self._sim_thread.start()
         self._update_ui()
 
+        
     def _build_ui(self):
         title_bar = tk.Frame(self, bg=COLORS["bg"])
         title_bar.pack(fill="x", padx=16, pady=(12, 4))
@@ -135,6 +139,12 @@ class AvionicsApp(tk.Tk):
         self.scr_speed,   _ = self._screen(row2, "VITESSE SOL GS (m/s)")
         self.scr_attack,  _ = self._screen(row2, "ANGLE ATTAQUE (°)")
         self.scr_desired, _ = self._screen(row2, "ALT. DÉSIRÉE (ft)")
+
+        # écran ressources système
+        row3 = tk.Frame(f, bg=COLORS["panel"])
+        row3.pack(fill="x")
+        self.scr_cpu, _ = self._screen(row3, "CPU (%)")
+        self.scr_ram, _ = self._screen(row3, "RAM (MB)")
 
     def _build_arinc_display(self, parent):
         f = self._section(parent, "MOTS ARINC 429 (hex)")
@@ -304,13 +314,19 @@ class AvionicsApp(tk.Tk):
         if warns:
             msg_parts.extend(warns)
         if msg_parts:
-            self.error_bar.config(text="  ⚠  " + "  |  ".join(msg_parts), bg="#300")
+            self.error_bar.config(text="  " .join(msg_parts), bg="#300")
         elif not self.error_bar["text"].startswith("  ✘"):
             self.error_bar.config(text="", bg=COLORS["bg"])
 
         # Sync slider avec puissance calculateur
         self.power_slider.set(int(data["power"]))
 
+        cpu = psutil.cpu_percent(interval=None)
+        mem = self.process.memory_info().rss / (1024*1024)
+
+        self.scr_cpu.set(f"{cpu:.1f}")
+        self.scr_ram.set(f"{mem:.1f}")
+        
         self.after(100, self._update_ui)
 
     def _draw_alt_bar(self, event=None):

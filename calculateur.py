@@ -6,21 +6,10 @@ import math
 from collections import deque
 
 class AvionicsCalculator:
-    """
-    Implémente la machine à états et tous les algorithmes de calcul.
-
-    CORRECTIONS APPLIQUÉES :
-      [FIX-1] Thread-safety : threading.Lock() sur toutes les méthodes
-              partagées entre le thread UI et le thread de simulation.
-      [FIX-3] Agrégateur décode les trames AFDX (ARINC 429) au lieu
-              d'accéder directement aux attributs du calculateur.
-      [FIX-4] Chute libre : drapeau _stalling + gestion dédiée dans tick().
-    """
-
     def __init__(self, afdx: AFDXNetwork):
         self.afdx = afdx
 
-        # [FIX-1] Verrou partagé entre thread UI et thread simulation
+        #Verrou partagé entre thread UI et thread simulation
         self._lock = threading.Lock()
 
         # État interne
@@ -33,9 +22,9 @@ class AvionicsCalculator:
 
         # Consignes
         self.desired_alt_ft  = 0.0
-        self.input_attack    = 0.0   # consigne angle attaque (0 = auto)
+        self.input_attack    = 0.0  
 
-        # [FIX-4] Drapeau de chute libre
+        #flag de chute libre
         self._stalling       = False
 
         # Messages
@@ -45,11 +34,9 @@ class AvionicsCalculator:
         # Historique pour affichage
         self.alt_history     = deque(maxlen=120)
 
-    # ── Validation des entrées (stateless, pas de lock nécessaire) ─────
+    #Validation des entrées (stateless, pas de lock nécessaire) 
     def validate_altitude(self, value: str) -> tuple[bool, float, str]:
         if value.strip() == "":
-            # Champ vide → garder l'altitude désirée courante (pour ne pas
-            # forcer la re-saisie quand on veut juste changer l'angle ou le taux)
             return True, self.desired_alt_ft, ""
         try:
             v = float(value)
@@ -72,7 +59,7 @@ class AvionicsCalculator:
 
     def validate_attack(self, value: str) -> tuple[bool, float, str]:
         if value.strip() == "":
-            return True, 0.0, ""   # champ vide → auto
+            return True, 0.0, ""   
         try:
             v = float(value)
         except ValueError:
@@ -81,11 +68,8 @@ class AvionicsCalculator:
             return False, 0.0, f"Angle d'attaque hors limites [±{ATTACK_MAX}]°"
         return True, v, ""
 
-    # ── Reset sécurisé (bouton ATTERRIR) ──────────────────────────────
+    #Reset sécurisé (bouton ATTERRIR)
     def reset(self):
-        """[FIX-1][FIX-4] Remet le système à zéro de manière thread-safe.
-        Envoie une trame AFDX immédiate pour que l'agrégateur se synchronise
-        sans attendre le prochain tick (évite altitude/erreur bloquées)."""
         with self._lock:
             self.state           = STATE_AU_SOL
             self.altitude_ft     = 0.0
@@ -98,31 +82,19 @@ class AvionicsCalculator:
             self.error_msg       = ""
             self.warnings        = []
             self._stalling       = False
-            # Trame immédiate — l'agrégateur voit altitude=0 et error=""
-            # dès le prochain update(), sans attendre le tick suivant.
             self._broadcast_state()
 
-    # ── Calcul de l'angle d'attaque auto ──────────────────────────────
+    #Calcul de l'angle d'attaque auto
     def compute_auto_attack(self, climb: float) -> float:
-        """
-        Angle d'attaque automatique, décalé autour de CRUISE_ANGLE :
-          angle = CRUISE_ANGLE + (climb / CLIMB_MAX) × (STALL_ANGLE - RES - CRUISE_ANGLE)
-
-          climb =    0  →  3.0°   (croisière, palier)
-          climb = +800  → +14.9°  (montée maximale)
-          climb = -800  →  -8.9°  (descente maximale, asymétrique = plus réaliste)
-
-        Note : cet offset ne s'applique QU'en mode auto. Le mode manuel
-        utilise la formule directe climb = ceil × (angle / 14.9°).
-        """
         if CLIMB_MAX_M_MIN == 0:
             return CRUISE_ANGLE
-        angle_range = (STALL_ANGLE - CLIMB_RES) - CRUISE_ANGLE   # 12.9°
+        angle_range = (STALL_ANGLE - CLIMB_RES) - CRUISE_ANGLE  
         angle = CRUISE_ANGLE + (climb / CLIMB_MAX_M_MIN) * angle_range
+
         # Limites : ne pas dépasser ±(STALL_ANGLE - RES) en absolu
         return max(-(STALL_ANGLE - CLIMB_RES), min(STALL_ANGLE - CLIMB_RES, angle))
 
-    # ── Calcul de la vitesse sol (GS) ─────────────────────────────────
+    #Calcul de la vitesse sol (GS)
     def _compute_gs(self) -> float:
         """
         Vitesse sol GS = (power/100) × MAX_SPEED × cos(attack)
@@ -138,11 +110,9 @@ class AvionicsCalculator:
                 * MAX_SPEED_M_S
                 * math.cos(math.radians(abs(self.attack_deg))))
 
-    # ── Machine à états ───────────────────────────────────────────────
+    #Machine à états 
     def set_desired_altitude(self, alt_ft: float, climb: float, attack: float):
-        """[FIX-1][FIX-4][FIX-5] Point d'entrée principal thread-safe."""
         with self._lock:
-            # [FIX-4] Commandes bloquées en cas de décrochage
             if self._stalling:
                 self.error_msg = "⚠ DÉCROCHAGE — Commandes bloquées. Utilisez ATTERRIR."
                 return
@@ -157,35 +127,28 @@ class AvionicsCalculator:
             angle_max = STALL_ANGLE - CLIMB_RES  # 14.9°
 
             if climb != 0.0:
-                # Back-calcul angle depuis taux de montée — inverse EXACT de tick() :
-                #   tick()  : climb = ceil × (angle - CRUISE_ANGLE) / angle_range
-                #   ici     : angle = CRUISE_ANGLE + (climb / ceil) × angle_range
                 ceil = min(self.motor_power_pct * 10.0, CLIMB_MAX_M_MIN)
                 if ceil > 0:
                     angle_range      = STALL_ANGLE - CLIMB_RES - CRUISE_ANGLE  # 11.9°
                     angle_from_climb = CRUISE_ANGLE + (climb / ceil) * angle_range
-                    # Clamp dans la plage valide (±STALL_ANGLE)
                     angle_from_climb = max(-STALL_ANGLE, min(STALL_ANGLE, angle_from_climb))
                     self.input_attack = angle_from_climb
                     self.warnings.append(
-                        f"↺ Taux {climb:+.1f} m/min → angle calculé : "
+                        f"Taux {climb:+.1f} m/min → angle calculé : "
                         f"{angle_from_climb:+.1f}°")
                 else:
-                    self.error_msg = "Puissance moteur nulle — augmentez la puissance avant d'entrer un taux de montée"
+                    self.error_msg = "Puissance moteur nulle : augmentez la puissance avant d'entrer un taux de montée"
                     return
             elif attack != 0.0:
-                # Input angle direct
                 self.input_attack = attack
             else:
-                # Mode auto
                 self.input_attack = 0.0
 
             if self.state == STATE_AU_SOL:
-                # Au sol, une altitude > 0 est obligatoire
                 if alt_ft <= 0:
                     self.error_msg = ("AU_SOL : fournir une altitude > 0 pour décoller")
                     return
-                # Cas 1 : altitude seule → mode auto
+                # Cas 1 : altitude seule -> mode auto
                 if self.input_attack == 0.0:
                     self.motor_power_pct = 50.0
                     self._transition_to(STATE_CHANGEMENT)
@@ -203,7 +166,6 @@ class AvionicsCalculator:
                     self._transition_to(STATE_CHANGEMENT)
 
     def set_motor_power(self, pct: float):
-        """[FIX-1] Thread-safe."""
         with self._lock:
             self.motor_power_pct = max(0.0, min(100.0, pct))
 
@@ -215,12 +177,9 @@ class AvionicsCalculator:
         self.afdx.send("CALCULATEUR", "AGGREGATEUR",
                         {"event": "state_change", "from": old, "to": new})
 
-    # ── Tick de simulation ────────────────────────────────────────────
+    # Tick de simulation 
     def tick(self, dt: float):
-        """[FIX-1][FIX-4][FIX-5] Mise à jour physique thread-safe."""
         with self._lock:
-
-            # ── [FIX-4] Chute libre ──────────────────────────────────
             if self._stalling:
                 self.climb_m_min = -CLIMB_MAX_M_MIN
                 self.attack_deg  = STALL_ANGLE
@@ -230,60 +189,46 @@ class AvionicsCalculator:
                 if self.altitude_ft <= 0.0:
                     self._stalling   = False
                     self.altitude_ft = 0.0
-                    self.error_msg   = "⚠ IMPACT AU SOL suite au décrochage"
+                    self.error_msg   = "!!! IMPACT AU SOL suite au décrochage"
                     self._transition_to(STATE_AU_SOL)
 
                 self.alt_history.append(self.altitude_ft)
                 self._broadcast_state()
                 return
 
-            # ── AU_SOL ───────────────────────────────────────────────
+            #AU_SOL 
             if self.state == STATE_AU_SOL:
                 self.altitude_ft  = 0.0
                 self.climb_m_min  = 0.0
                 self.attack_deg   = 0.0
                 self.speed_m_s    = 0.0
                 self.alt_history.append(0.0)
-                # Broadcast indispensable : met à jour le cache de
-                # l'agrégateur après un reset (sinon altitude et messages
-                # d'erreur restent figés à la dernière valeur connue).
                 self._broadcast_state()
                 return
 
-            # ── VOL_CROISIÈRE ────────────────────────────────────────
+            #VOL_CROISIÈRE
             if self.state == STATE_VOL_CROISIERE:
+                # (1) Contrainte respectée : en vol de croisière le taux de montée est nul
                 self.climb_m_min = 0.0
                 self.attack_deg  = CRUISE_ANGLE
-                self.speed_m_s   = self._compute_gs()   # GS pleine à angle de croisière
+                self.speed_m_s   = self._compute_gs() 
                 self.alt_history.append(self.altitude_ft)
                 self._broadcast_state()
                 return
 
-            # ── CHANGEMENT_ALT ───────────────────────────────────────
-            #
-            # Formule UNIFIÉE (auto et manuel) :
-            #   climb = ceil × (angle - CRUISE_ANGLE) / angle_range
-            #   angle = CRUISE_ANGLE + (climb / ceil) × angle_range
-            #
-            #   angle_range = STALL_ANGLE - CLIMB_RES - CRUISE_ANGLE = 11.9°
-            #   ceil        = min(power×10, 800)
-            #
-            #   angle = +14.9° → climb = +ceil  (+800 à 80%)
-            #   angle = + 3.0° → climb =   0    (palier, croisière)
-            #   angle = - 8.9° → climb = -ceil  (-800 à 80%)
-            #   angle ≥ +15°   → décrochage positif
-            #   angle ≤ - 9.0° → décrochage négatif
+            # CHANGEMENT_ALT
+            angle_range    = STALL_ANGLE - CLIMB_RES - CRUISE_ANGLE  
 
-            angle_range    = STALL_ANGLE - CLIMB_RES - CRUISE_ANGLE  # 11.9°
+            # (2) Contrainte respectée : 100 m/min de taux de montée pour 10% de puissance moteur
             base_power     = (self.motor_power_pct / 10.0) * 100.0
             effective_ceil = min(base_power, CLIMB_MAX_M_MIN)
             delta_ft       = self.desired_alt_ft - self.altitude_ft
 
             if self.input_attack != 0.0:
-                # MODE MANUEL — formule avec offset CRUISE_ANGLE
+                # MODE MANUEL : formule avec offset CRUISE_ANGLE
                 raw_climb = effective_ceil * (self.input_attack - CRUISE_ANGLE) / angle_range
             else:
-                # MODE AUTO — direction vers la cible, plafond plein
+                # MODE AUTO : direction vers la cible, plafond plein
                 direction = 1.0 if delta_ft >= 0 else -1.0
                 raw_climb = direction * effective_ceil
 
@@ -292,6 +237,7 @@ class AvionicsCalculator:
                 self.climb_m_min = 0.0
             else:
                 delta_m     = delta_ft / FT_PER_M
+                # (3) Contrainte respectée : diminution progressive du taux à l’approche de l’altitude cible
                 slow_zone_m = max(1.0, abs(raw_climb) * 0.1)
                 factor      = (max(0.05, abs(delta_m) / slow_zone_m)
                                if abs(delta_m) < slow_zone_m else 1.0)
@@ -300,21 +246,16 @@ class AvionicsCalculator:
             self.climb_m_min = max(-CLIMB_MAX_M_MIN,
                                    min(CLIMB_MAX_M_MIN, self.climb_m_min))
 
-            # Angle d'attaque — calculé depuis le taux final (sens unique)
             if self.input_attack != 0.0:
                 self.attack_deg = self.input_attack
             else:
                 self.attack_deg = self.compute_auto_attack(self.climb_m_min)
 
             # Détecter le décrochage :
-            #   positif : angle ≥ +STALL_ANGLE (+15°)
-            #   négatif : angle ≤  NEG_STALL_ANGLE (-9.0°)
-            stalled = (self.attack_deg >= STALL_ANGLE or
-                       self.attack_deg <= NEG_STALL_ANGLE)
+            stalled = (self.attack_deg >= STALL_ANGLE or self.attack_deg <= NEG_STALL_ANGLE)
             if stalled:
                 self._stalling = True
-                self.error_msg = (f"⚠ DÉCROCHAGE ! angle={self.attack_deg:.1f}° "
-                                  f"— Chute libre initiée")
+                self.error_msg = (f"DÉCROCHAGE ! angle={self.attack_deg:.1f}° "f"Chute libre initiée")
                 self.alt_history.append(self.altitude_ft)
                 self._broadcast_state()
                 return
@@ -333,30 +274,19 @@ class AvionicsCalculator:
 
             # Altitude cible atteinte (tolérance 2 ft)
             # Si la cible est 0 ft (le sol), c'est AU_SOL et non VOL_CROISIÈRE
-            if (self.state == STATE_CHANGEMENT and
-                    abs(self.altitude_ft - self.desired_alt_ft) < 2.0):
+            if (self.state == STATE_CHANGEMENT and abs(self.altitude_ft - self.desired_alt_ft) < 2.0):
                 self.altitude_ft = self.desired_alt_ft
                 if self.desired_alt_ft <= ALT_MIN_FT:
                     self._transition_to(STATE_AU_SOL)
                 else:
                     self._transition_to(STATE_VOL_CROISIERE)
-
-            # Vitesse sol GS — composante horizontale du vecteur vitesse
-            # GS = (power/100) × MAX_SPEED × cos(attack)
-            # Puissance → magnitude totale, angle → fraction horizontale.
-            # En croisière (attack=3°) → presque toute la puissance en GS.
-            # En montée steep (attack=14.9°) → légèrement réduit.
+                    
             self.speed_m_s = self._compute_gs()
 
             self.alt_history.append(self.altitude_ft)
             self._broadcast_state()
 
     def _broadcast_state(self):
-        """
-        [FIX-3] Encode les mots ARINC 429 et enrichit le payload AFDX
-        avec les métadonnées nécessaires à l'agrégateur
-        (desired_alt, power, speed, warnings, error).
-        """
         try:
             w001 = ARINC429.encode_label001_altitude(int(self.altitude_ft),
                                                      self.state)
@@ -376,4 +306,4 @@ class AvionicsCalculator:
             }
             self.afdx.send("CALCULATEUR", "AGGREGATEUR", payload)
         except Exception:
-            pass   # silencieux pour éviter de bloquer la simulation
+            pass   

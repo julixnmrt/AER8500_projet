@@ -4,21 +4,13 @@ from calculateur import AvionicsCalculator
 from constantes import *
 import threading
 
-# ─────────────────────────────────────────────
-#  AGRÉGATEUR
-# ─────────────────────────────────────────────
-class Aggregator:
-    """
-    [FIX-3] L'agrégateur décode maintenant les trames AFDX reçues
-    (labels ARINC 429) au lieu d'accéder directement aux attributs
-    du calculateur.  Failover automatique canal A → canal B.
-    """
 
+class Aggregator:
     def __init__(self, afdx: AFDXNetwork, calculator: AvionicsCalculator):
         self.afdx       = afdx
-        self.calc       = calculator  # conservé uniquement pour reset()
+        self.calc       = calculator  
         self._lock      = threading.Lock()
-        # Cache interne — initialisé à des valeurs neutres
+
         self._data: dict = {
             "altitude":  0.0,
             "climb":     0.0,
@@ -37,14 +29,13 @@ class Aggregator:
         }
 
     def update(self):
-        """[FIX-3] Décode les labels ARINC 429 depuis les trames AFDX.
-        Failover automatique : tente canal A puis canal B."""
+        """Décode les labels ARINC 429 depuis les trames AFDX."""
         frame = self.afdx.receive('A') or self.afdx.receive('B')
         if not frame:
             return
 
         p = frame.get("payload", {})
-        # Ignorer les trames d'événements (state_change) sans labels ARINC
+
         if "label001" not in p:
             return
 
@@ -79,6 +70,5 @@ class Aggregator:
             pass
 
     def get_display_data(self) -> dict:
-        """Retourne un snapshot thread-safe des données décodées."""
         with self._lock:
             return dict(self._data)

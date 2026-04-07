@@ -6,11 +6,13 @@ CLIMB_RES        = 0.1        # résolution taux de montée
 ALT_RES          = 1          # résolution altitude (pied)
 STALL_ANGLE      = 15.0       # angle de décrochage positif (°)
 CRUISE_ANGLE     = 3.0        # angle d'attaque en vol de croisière (palier)
+
 # Décrochage négatif : angle en dessous duquel l'avion décroche en descente
 # = CRUISE_ANGLE - (STALL_ANGLE - CLIMB_RES - CRUISE_ANGLE) - CLIMB_RES = -9.0°
+
 NEG_STALL_ANGLE  = CRUISE_ANGLE - (STALL_ANGLE - CLIMB_RES - CRUISE_ANGLE) - CLIMB_RES
-ATTACK_MAX       = STALL_ANGLE              # 15.0° — permet la démo du décrochage positif
-ATTACK_MIN       = -(STALL_ANGLE)           # -15.0° — permet la démo du décrochage négatif
+ATTACK_MAX       = STALL_ANGLE              
+ATTACK_MIN       = -(STALL_ANGLE)          
 MAX_SPEED_M_S    = 150.0      # vitesse sol max à 100% puissance (m/s ≈ 540 km/h)
 SIM_TICK_S       = 0.05       # secondes par tick de simulation
 

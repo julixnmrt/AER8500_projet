@@ -18,7 +18,7 @@ class ARINC429:
     @staticmethod
     def encode_label001_altitude(altitude_ft: int, state: int) -> int:
         """
-        Label 001 — Altitude + État
+        Label 001 Altitude + État
           Altitude   bits [13:28]  (16 bits binaire, résolution 1 pied)
           État       bits [11:12]  (2 bits)
           Label      bits [1:8]    = 0x01
@@ -29,7 +29,11 @@ class ARINC429:
             raise ValueError(f"État invalide : {state}")
 
         label      = 0b00000001
+
+        # État avionique encodé sur les bits [11:12] : 0=AU_SOL, 1=CHANGEMENT_ALT, 2=VOL_CROISIERE
         state_bits = (state & 0x3) << 10
+
+        # Altitude encodée en binaire sur les bits [13:28], résolution 1 ft, max 40000 ft (énoncé)
         alt_bits   = (altitude_ft & 0xFFFF) << 12
 
         word   = label | state_bits | alt_bits
@@ -70,7 +74,10 @@ class ARINC429:
     def encode_label002_climb(climb_m_min: float) -> int:
         """Label 002 : Taux de montée BCD 4 chiffres, résolution 0.1 m/min"""
         label  = 0b00000010
+
+        # Taux de montée encodé en BCD sur 4 chiffres, résolution 0.1 m/min, max ±800 m/min (énoncé)
         bcd    = ARINC429.encode_bcd(climb_m_min, 4, 1)
+
         word   = label | (bcd << 8)
         parity = ARINC429.odd_parity(word & 0x7FFFFFFF)
         word  |= (parity << 31)
@@ -85,6 +92,8 @@ class ARINC429:
     def encode_label003_attack(angle_deg: float) -> int:
         """Label 003 : Angle d'attaque BCD 3 chiffres, résolution 0.1°"""
         label  = 0b00000011
+
+        # Angle d'attaque encodé en BCD sur 3 chiffres, résolution 0.1°, plage ±16° (énoncé)
         bcd    = ARINC429.encode_bcd(angle_deg, 3, 1)
         word   = label | (bcd << 8)
         parity = ARINC429.odd_parity(word & 0x7FFFFFFF)
