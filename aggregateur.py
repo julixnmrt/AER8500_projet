@@ -69,6 +69,11 @@ class Aggregator:
         except Exception:
             pass
 
+    def set_motor_power(self, pct: float):
+        """Reçoit la puissance du panneau et la transmet au calculateur via AFDX."""
+        self.afdx.send("PANNEAU", "CALCULATEUR", {"motor_power": round(pct, 1)})
+        self.calc.set_motor_power(pct)
+
     def get_display_data(self) -> dict:
         with self._lock:
             return dict(self._data)

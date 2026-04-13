@@ -2,9 +2,6 @@ from collections import deque
 import json
 from datetime import datetime
 
-# ─────────────────────────────────────────────
-#  SIMULATION AFDX (réseau virtuel)
-# ─────────────────────────────────────────────
 class AFDXNetwork:
     """
     Simulation d'un réseau AFDX simplifié.

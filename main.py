@@ -262,7 +262,7 @@ class AvionicsApp(tk.Tk):
         self.error_bar.config(text="", bg=COLORS["bg"])
 
     def _on_power_change(self, val):
-        self.calculator.set_motor_power(float(val))
+        self.aggregator.set_motor_power(float(val))
 
     def _sim_loop(self):
         while self._running:

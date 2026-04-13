@@ -126,6 +126,12 @@ class AvionicsCalculator:
             self.desired_alt_ft = alt_ft
             angle_max = STALL_ANGLE - CLIMB_RES  # 14.9°
 
+            # Puissance déduite du taux si fourni, sinon 50% par défaut au sol
+            if climb != 0.0:
+                self.motor_power_pct = min(100.0, abs(climb) / 10.0)
+            elif self.state == STATE_AU_SOL and self.motor_power_pct == 0.0:
+                self.motor_power_pct = 50.0
+
             if climb != 0.0:
                 ceil = min(self.motor_power_pct * 10.0, CLIMB_MAX_M_MIN)
                 if ceil > 0:
@@ -148,14 +154,7 @@ class AvionicsCalculator:
                 if alt_ft <= 0:
                     self.error_msg = ("AU_SOL : fournir une altitude > 0 pour décoller")
                     return
-                # Cas 1 : altitude seule -> mode auto
-                if self.input_attack == 0.0:
-                    self.motor_power_pct = 50.0
-                    self._transition_to(STATE_CHANGEMENT)
-                # Cas 2 : altitude + taux ou angle
-                else:
-                    self.motor_power_pct = 50.0
-                    self._transition_to(STATE_CHANGEMENT)
+                self._transition_to(STATE_CHANGEMENT)
 
             elif self.state == STATE_CHANGEMENT:
                 if alt_ft == self.altitude_ft:
@@ -182,7 +181,7 @@ class AvionicsCalculator:
         with self._lock:
             if self._stalling:
                 self.climb_m_min = -CLIMB_MAX_M_MIN
-                self.attack_deg  = STALL_ANGLE
+                # On conserve l'angle qui a déclenché le décrochage
                 climb_ft_s       = (self.climb_m_min * FT_PER_M) / 60.0
                 self.altitude_ft = max(0.0, self.altitude_ft + climb_ft_s * dt)
 
