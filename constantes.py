@@ -7,8 +7,7 @@ ALT_RES          = 1          # résolution altitude (pied)
 STALL_ANGLE      = 15.0       # angle de décrochage positif (°)
 CRUISE_ANGLE     = 3.0        # angle d'attaque en vol de croisière (palier)
 
-# Décrochage négatif : angle en dessous duquel l'avion décroche en descente
-# = CRUISE_ANGLE - (STALL_ANGLE - CLIMB_RES - CRUISE_ANGLE) - CLIMB_RES = -9.0°
+# Décrochage négatif : angle en dessous duquel l'avion décroche en descente = -9.0°
 
 NEG_STALL_ANGLE  = CRUISE_ANGLE - (STALL_ANGLE - CLIMB_RES - CRUISE_ANGLE) - CLIMB_RES
 ATTACK_MAX       = STALL_ANGLE              

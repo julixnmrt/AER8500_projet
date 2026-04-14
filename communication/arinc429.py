@@ -43,14 +43,12 @@ class ARINC429:
 
     @staticmethod
     def decode_label001(word: int):
-        """Décode label 001 -> (altitude_ft, state)"""
         altitude_ft = (word >> 12) & 0xFFFF
         state       = (word >> 10) & 0x3
         return altitude_ft, state
 
     @staticmethod
     def encode_bcd(value: float, digits: int, decimals: int) -> int:
-        """Encode un flottant en BCD (digits chiffres, decimals décimales)."""
         factor  = 10 ** decimals
         int_val = round(abs(value) * factor)
         sign    = 0 if value >= 0 else 1
@@ -62,7 +60,6 @@ class ARINC429:
 
     @staticmethod
     def decode_bcd(bcd: int, digits: int, decimals: int) -> float:
-        """Décode un BCD -> flottant."""
         sign = (bcd >> (digits * 4)) & 1
         val  = 0
         for i in range(digits - 1, -1, -1):
@@ -72,12 +69,9 @@ class ARINC429:
 
     @staticmethod
     def encode_label002_climb(climb_m_min: float) -> int:
-        """Label 002 : Taux de montée BCD 4 chiffres, résolution 0.1 m/min"""
         label  = 0b00000010
-
         # Taux de montée encodé en BCD sur 4 chiffres, résolution 0.1 m/min, max ±800 m/min (énoncé)
         bcd    = ARINC429.encode_bcd(climb_m_min, 4, 1)
-
         word   = label | (bcd << 8)
         parity = ARINC429.odd_parity(word & 0x7FFFFFFF)
         word  |= (parity << 31)
@@ -90,9 +84,7 @@ class ARINC429:
 
     @staticmethod
     def encode_label003_attack(angle_deg: float) -> int:
-        """Label 003 : Angle d'attaque BCD 3 chiffres, résolution 0.1°"""
         label  = 0b00000011
-
         # Angle d'attaque encodé en BCD sur 3 chiffres, résolution 0.1°, plage ±16° (énoncé)
         bcd    = ARINC429.encode_bcd(angle_deg, 3, 1)
         word   = label | (bcd << 8)

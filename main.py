@@ -45,6 +45,7 @@ class AvionicsApp(tk.Tk):
         self.process = psutil.Process(os.getpid())
         
         self._last_alt_ft: float = 0.0
+        self._time_scale: float = 1.0
 
         # Thread de simulation
         self._running    = True
@@ -215,6 +216,18 @@ class AvionicsApp(tk.Tk):
         self.power_slider.set(50)
         self.power_slider.pack(fill="x", padx=4)
 
+        f2 = self._section(parent, "ACCÉLÉRATION SIMULATION (x)")
+        self.time_scale_slider = tk.Scale(f2, from_=1, to=100,
+                                          orient="horizontal",
+                                          bg=COLORS["panel"], fg=COLORS["yellow"],
+                                          troughcolor="#0a0f15",
+                                          activebackground=COLORS["yellow"],
+                                          highlightthickness=0,
+                                          font=("Courier New", 8),
+                                          command=self._on_time_scale_change)
+        self.time_scale_slider.set(1)
+        self.time_scale_slider.pack(fill="x", padx=4)
+
     def _build_afdx_log(self, parent):
         f = self._section(parent, "JOURNAL AFDX (Canaux A & B — Redondance)")
         self.afdx_text = tk.Text(f, height=7,
@@ -264,9 +277,12 @@ class AvionicsApp(tk.Tk):
     def _on_power_change(self, val):
         self.aggregator.set_motor_power(float(val))
 
+    def _on_time_scale_change(self, val):
+        self._time_scale = float(val)
+
     def _sim_loop(self):
         while self._running:
-            self.calculator.tick(SIM_TICK_S)
+            self.calculator.tick(SIM_TICK_S * self._time_scale)
             self.aggregator.update()
             time.sleep(SIM_TICK_S)
 

@@ -18,7 +18,7 @@ class AvionicsCalculator:
         self.climb_m_min     = 0.0
         self.attack_deg      = 0.0
         self.motor_power_pct = 0.0
-        self.speed_m_s       = 0.0   # vitesse sol GS — composante horizontale (m/s)
+        self.speed_m_s       = 0.0   # Vitesse au Sol : Ground Speed — composante horizontale (m/s)
 
         # Consignes
         self.desired_alt_ft  = 0.0
@@ -90,8 +90,6 @@ class AvionicsCalculator:
             return CRUISE_ANGLE
         angle_range = (STALL_ANGLE - CLIMB_RES) - CRUISE_ANGLE  
         angle = CRUISE_ANGLE + (climb / CLIMB_MAX_M_MIN) * angle_range
-
-        # Limites : ne pas dépasser ±(STALL_ANGLE - RES) en absolu
         return max(-(STALL_ANGLE - CLIMB_RES), min(STALL_ANGLE - CLIMB_RES, angle))
 
     #Calcul de la vitesse sol (GS)
@@ -103,7 +101,7 @@ class AvionicsCalculator:
           - La puissance moteur détermine la magnitude totale de la vitesse.
           - L'angle d'attaque redistribue entre vertical (climb) et horizontal (GS).
           - En croisière (attack=3°, climb=0) : GS maximale pour la puissance donnée.
-          - En montée steep (attack=14.9°)    : GS légèrement réduite (cos↘).
+          - En montée steep (attack=14.9°)    : GS légèrement réduite (cos décroissant).
           - Au sol (power=0 ou state AU_SOL)  : GS = 0.
         """
         return ((self.motor_power_pct / 100.0)
@@ -124,7 +122,7 @@ class AvionicsCalculator:
                 self.warnings.append(f"⚠ Risque de décrochage ! Angle = {attack}°")
 
             self.desired_alt_ft = alt_ft
-            angle_max = STALL_ANGLE - CLIMB_RES  # 14.9°
+            angle_max = STALL_ANGLE - CLIMB_RES
 
             # Puissance déduite du taux si fourni, sinon 50% par défaut au sol
             if climb != 0.0:
@@ -135,7 +133,7 @@ class AvionicsCalculator:
             if climb != 0.0:
                 ceil = min(self.motor_power_pct * 10.0, CLIMB_MAX_M_MIN)
                 if ceil > 0:
-                    angle_range      = STALL_ANGLE - CLIMB_RES - CRUISE_ANGLE  # 11.9°
+                    angle_range      = STALL_ANGLE - CLIMB_RES - CRUISE_ANGLE
                     angle_from_climb = CRUISE_ANGLE + (climb / ceil) * angle_range
                     angle_from_climb = max(-STALL_ANGLE, min(STALL_ANGLE, angle_from_climb))
                     self.input_attack = angle_from_climb
@@ -169,7 +167,6 @@ class AvionicsCalculator:
             self.motor_power_pct = max(0.0, min(100.0, pct))
 
     def _transition_to(self, new_state: int):
-        """Transition d'état + notification AFDX. Appelée dans le lock."""
         old = STATE_NAMES[self.state]
         self.state = new_state
         new = STATE_NAMES[new_state]
@@ -181,7 +178,6 @@ class AvionicsCalculator:
         with self._lock:
             if self._stalling:
                 self.climb_m_min = -CLIMB_MAX_M_MIN
-                # On conserve l'angle qui a déclenché le décrochage
                 climb_ft_s       = (self.climb_m_min * FT_PER_M) / 60.0
                 self.altitude_ft = max(0.0, self.altitude_ft + climb_ft_s * dt)
 
@@ -207,7 +203,7 @@ class AvionicsCalculator:
 
             #VOL_CROISIÈRE
             if self.state == STATE_VOL_CROISIERE:
-                # (1) Contrainte respectée : en vol de croisière le taux de montée est nul
+                # Contrainte respectée : en vol de croisière le taux de montée est nul
                 self.climb_m_min = 0.0
                 self.attack_deg  = CRUISE_ANGLE
                 self.speed_m_s   = self._compute_gs() 
@@ -218,7 +214,7 @@ class AvionicsCalculator:
             # CHANGEMENT_ALT
             angle_range    = STALL_ANGLE - CLIMB_RES - CRUISE_ANGLE  
 
-            # (2) Contrainte respectée : 100 m/min de taux de montée pour 10% de puissance moteur
+            # Contrainte respectée : 100 m/min de taux de montée pour 10% de puissance moteur
             base_power     = (self.motor_power_pct / 10.0) * 100.0
             effective_ceil = min(base_power, CLIMB_MAX_M_MIN)
             delta_ft       = self.desired_alt_ft - self.altitude_ft
@@ -236,7 +232,7 @@ class AvionicsCalculator:
                 self.climb_m_min = 0.0
             else:
                 delta_m     = delta_ft / FT_PER_M
-                # (3) Contrainte respectée : diminution progressive du taux à l’approche de l’altitude cible
+                # Contrainte respectée : diminution progressive du taux à l’approche de l’altitude cible
                 slow_zone_m = max(1.0, abs(raw_climb) * 0.1)
                 factor      = (max(0.05, abs(delta_m) / slow_zone_m)
                                if abs(delta_m) < slow_zone_m else 1.0)
